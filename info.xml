@@ -1,0 +1,67 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<ota_firmware>
+	<firmware_version>
+		<version_code>0x10000</version_code>
+		<version_res>0x10000</version_res>
+		<version_name>1.00_2408181820</version_name>
+		<board_name>jx402_01_3089c</board_name>
+		</firmware_version>
+<partitions>
+	<partitionsNum>5</partitionsNum>
+	<partition>
+		<type>TEMP</type>
+		<name>fw0_temp</name>
+		<file_id>254</file_id>
+		<storage_id>2</storage_id>
+		<file_name>TEMP.bin</file_name>
+		<file_size>0x13f15c</file_size>
+		<orig_size>0x13f15c</orig_size>
+		<version>0xfefefefe</version>
+		<checksum>0x4ac2d387</checksum>
+	</partition>
+	<partition>
+		<type>DATA</type>
+		<name>res_a</name>
+		<file_id>10</file_id>
+		<storage_id>2</storage_id>
+		<file_name>res.bin</file_name>
+		<file_size>0x5dd56c</file_size>
+		<orig_size>0x89da80</orig_size>
+		<version>0x38</version>
+		<checksum>0xf160748b</checksum>
+	</partition>
+	<partition>
+		<type>DATA</type>
+		<name>font</name>
+		<file_id>12</file_id>
+		<storage_id>2</storage_id>
+		<file_name>fonts.bin</file_name>
+		<file_size>0x773868</file_size>
+		<orig_size>0x912900</orig_size>
+		<version>0x2B</version>
+		<checksum>0xd5aa43a2</checksum>
+	</partition>
+	<partition>
+		<type>DATA</type>
+		<name>res_e</name>
+		<file_id>14</file_id>
+		<storage_id>2</storage_id>
+		<file_name>res_e.bin</file_name>
+		<file_size>0x256b630</file_size>
+		<orig_size>0x380de00</orig_size>
+		<version>5</version>
+		<checksum>0xa8749cf2</checksum>
+	</partition>
+	<partition>
+		<type>DATA</type>
+		<name>sdfs_k</name>
+		<file_id>20</file_id>
+		<storage_id>2</storage_id>
+		<file_name>sdfs_k.bin</file_name>
+		<file_size>0x4be58</file_size>
+		<orig_size>0x7ff40</orig_size>
+		<version>0x1E</version>
+		<checksum>0xd682d381</checksum>
+	</partition>
+</partitions>
+</ota_firmware>
