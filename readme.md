@@ -4,7 +4,7 @@ a half-assed FW dump of the CMF watch pro 2
 here you can find: 
 - the original firmware.bin (firmware directly flashed to the watch)
 - the dumped firmware.bin (extracted using `./extract.py`)
-- the folder named `extracted`, which contains all the files extracted from the dumped firmware
+- ~~the folder named `extracted`, which contains all the files extracted from the dumped firmware~~ it was 700mb
 
 i'd like to thank u/IndependenceSmall902 for finding the firmware.bin for the watch in the first place (https://www.reddit.com/r/CMFTech/comments/1eylsuo/finally_got_the_ota_url_of_wtch_pro_2/)
 
