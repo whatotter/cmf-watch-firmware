@@ -23,7 +23,7 @@ i'd like to thank u/IndependenceSmall902 for finding the firmware.bin for the wa
 - a ton of images (100% .mp4s in there, binwalk extracted each frame though and it ballooned to 60gbs)
 - i hate this thing
 - binwalk LOVES ballooning the fuck out of the .bin file, extract was 700mb, mostly of repeated letters
-    - if someone knows why please let me know
+    - ~~if someone knows why please let me know~~ need to use a file carver, duh
 
 ## strings autopsy
 - has uart (uart0, uart1, uart2)
