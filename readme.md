@@ -11,6 +11,7 @@ i'd like to thank u/IndependenceSmall902 for finding the firmware.bin for the wa
 ## todo list:
 - pull all assets (videos, images, gifs)
 - pull fonts
+- find/make a good file carver
 
 # autopsy
 - .bin is filled with LZMA archives, each split by .xz's magic number (`0xfd377a585a00`)
