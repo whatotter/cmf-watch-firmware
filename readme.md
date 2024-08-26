@@ -8,6 +8,10 @@ here you can find:
 
 i'd like to thank u/IndependenceSmall902 for finding the firmware.bin for the watch in the first place (https://www.reddit.com/r/CMFTech/comments/1eylsuo/finally_got_the_ota_url_of_wtch_pro_2/)
 
+## todo list:
+- pull all assets (videos, images, gifs)
+- pull fonts
+
 # autopsy
 - .bin is filled with LZMA archives, each split by .xz's magic number (`0xfd377a585a00`)
 - each LZMA archive usually ends in `00 00 00 00 04 59 5A` (ascii `.....YZ`), commonly followed by `4C 5A 4D 41` (ascii for 'LZMA')
