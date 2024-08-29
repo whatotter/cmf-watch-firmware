@@ -1,0 +1,10 @@
+{
+    ".jpeg": {
+      "minBytes": 24,
+      "magicStart": "0xff 0xd8",
+      "magicEnd": "0xff 0xd9",
+      "magics": [
+        "0x4a 0x46 0x49 0x46"
+      ]
+    }
+  }

@@ -6,6 +6,7 @@ Author: github.com/whatotter
 8/25/24
 """
 
+import json
 import argparse, os
 
 try: # https://stackoverflow.com/a/42079784
@@ -20,6 +21,7 @@ args = parser.parse_args()
 # Both of these can be confirmed at http://fileformats.archiveteam.org/wiki/XZ
 xzMagicNums = [b'\xfd', b'\x37', b'\x7a', b'\x58', b'\x5a'] 
 xzEndings = [b'\x00', b'\x00', b'\x00', b'\x00', b'\x04', b'\x59', b'\x5a']
+lzmaMagicNums = [b'\x4c', b'\x5a', b'\x4d', b'\x41', b'\x10']
 
 binData = b''
 begin = False
@@ -31,10 +33,9 @@ if not os.path.exists("./xz dumps"):
 
 def write(byte):
     global counter
-    with open("./xz dumps/dump {}.bin.xz".format(counter), "wb") as f:
+    with open("./xz dumps/{}.bin.xz".format(counter), "wb") as f:
         f.write(byte)
         f.flush()
-
     counter += 1
 
 # Read .bin file.
@@ -42,7 +43,9 @@ with open(args.bin, "rb") as f:
     binData = f.read()
 
 # Extract all .XZ archives from the bin file.
+lzmaData = {}
 while True:
+    LZMAstart = binData.find(b''.join(lzmaMagicNums))
     start = binData.find(b''.join(xzMagicNums))
     end = binData.find(b''.join(xzEndings))+len(xzEndings)
 
@@ -54,19 +57,23 @@ while True:
         print("done: {}".format(len(binData)))
         break
     
+    lzmaData[str(counter)] = binData[LZMAstart:start].decode("latin-1")
     write(binData[start:end])
 
     part = binData.partition(b''.join(xzEndings))
     addr += len(part[0])
     binData = part[2]
 
+with open("recompile.json", "w") as f:
+    f.write(json.dumps(lzmaData, indent=4))
+    f.flush()
 
 # (painfully) Extract all .XZ archives, merge them all into one file.
 xzs = os.listdir("./xz dumps")
 mergeBin = open("merged.bin", "wb")
 
 for x in range(1, counter):
-    xz = "dump {}.bin.xz".format(x)
+    xz = "{}.bin.xz".format(x)
     with lzma.open("./xz dumps/{}".format(xz)) as f:
         
         print("\r[+] merging {} {}".format(xz, " "*25), end="", flush=True)
