@@ -171,17 +171,21 @@ def read_partitions(orig_path):
     """Decode the original .bin into its partitions. Returns a dict of
     {partition_name: raw_bytes} for TEMP (inner AOTA), res, fonts, res_e,
     sdfs_k, plus the outer ota.xml and FAT, and the inner AOTA's ota.xml.
-    Also stores 'trailing_data' (bytes after the AOTA total_size, e.g. AGPS)."""
+    Also stores 'trailing_data' (bytes after the AOTA total_size, e.g. AGPS).
+    Also stores '_raw_regions' with original compressed LZMA bytes."""
     data = open(orig_path, "rb").read()
     fat = parse_fat(data)
     parts = {}
 
+    raw_regions = {}
+    for name, off, size, _crc in fat:
+        raw_regions[name] = data[off:off + size]
+
     outer_names = [e[0] for e in fat]
     # ota.xml is the first (raw); remaining are LZMA regions.
     for name, off, size, _crc in fat:
-        region = data[off:off + size]
         if name == "ota.xml":
-            parts["outer_ota.xml"] = region
+            parts["outer_ota.xml"] = data[off:off + size]
         else:
             parts[name] = decode_lzma_region(data, off, size)
 
@@ -191,14 +195,13 @@ def read_partitions(orig_path):
         if name == "ota.xml":
             parts["inner_ota.xml"] = inner[off:off + size]
         else:
-            # app.bin / sdfs.bin are raw in the inner AOTA
             parts[f"inner_{name}"] = inner[off:off + size]
 
-    # Preserve trailing data after the AOTA total_size (e.g. AGPS section).
     total_size = struct.unpack_from("<I", data, 0x14)[0]
     if total_size < len(data):
         parts["trailing_data"] = data[total_size:]
 
+    parts["_raw_regions"] = raw_regions
     return parts, data
 
 
@@ -213,95 +216,114 @@ def patch_version(xml_bytes, old_ver, new_ver):
     return xml_bytes.replace(old_tag, new_tag)
 
 
-def patch_ota_xml_file_size(xml_bytes, file_name, new_size_hex):
-    """Patch <file_size> for a given <file_name> in ota.xml bytes."""
+def patch_ota_xml_entry(xml_bytes, file_name, file_size=None, orig_size=None,
+                        checksum=None):
+    """Patch fields for a given <file_name> in ota.xml bytes.
+    Any of file_size, orig_size, checksum can be None (left unchanged).
+    All values should be hex strings like '0x13f170'."""
     import re
-    if isinstance(new_size_hex, str):
-        new_size_hex = new_size_hex.encode()
     lines = xml_bytes.split(b'\n')
     found_file = False
+    patched = False
     for i, line in enumerate(lines):
         if f'<file_name>{file_name}</file_name>'.encode() in line:
             found_file = True
-        if found_file and b'<file_size>' in line:
-            lines[i] = re.sub(rb'(<file_size>)[^<]+(</file_size>)',
-                              rb'\g<1>' + new_size_hex + rb'\g<2>',
-                              line)
-            break
+            patched = False
+            continue
+        if found_file:
+            if not patched and b'</partition>' in line:
+                found_file = False
+                continue
+            if file_size is not None and b'<file_size>' in line:
+                new_val = file_size.encode() if isinstance(file_size, str) else file_size
+                lines[i] = re.sub(rb'(<file_size>)[^<]+(</file_size>)',
+                                  rb'\g<1>' + new_val + rb'\g<2>', line)
+            if orig_size is not None and b'<orig_size>' in line:
+                new_val = orig_size.encode() if isinstance(orig_size, str) else orig_size
+                lines[i] = re.sub(rb'(<orig_size>)[^<]+(</orig_size>)',
+                                  rb'\g<1>' + new_val + rb'\g<2>', line)
+            if checksum is not None and b'<checksum>' in line:
+                new_val = checksum.encode() if isinstance(checksum, str) else checksum
+                lines[i] = re.sub(rb'(<checksum>)[^<]+(</checksum>)',
+                                  rb'\g<1>' + new_val + rb'\g<2>', line)
     return b'\n'.join(lines)
 
 
-def patch_ota_xml_checksum(xml_bytes, file_name, new_crc_hex):
-    """Patch <checksum> for a given <file_name> in ota.xml bytes."""
-    import re
-    if isinstance(new_crc_hex, str):
-        new_crc_hex = new_crc_hex.encode()
-    lines = xml_bytes.split(b'\n')
-    found_file = False
-    for i, line in enumerate(lines):
-        if f'<file_name>{file_name}</file_name>'.encode() in line:
-            found_file = True
-        if found_file and b'<checksum>' in line:
-            lines[i] = re.sub(rb'(<checksum>)[^<]+(</checksum>)',
-                              rb'\g<1>' + new_crc_hex + rb'\g<2>',
-                              line)
-            break
-    return b'\n'.join(lines)
-
-
-def build(parts, new_app=None, chunk=CHUNK_TEMP, version=None):
+def build(parts, new_app=None, chunk=CHUNK_TEMP, version=None, changed_partitions=None):
     """Assemble the final .bin from decoded partition bytes.
 
-    parts: dict from read_partitions().
+    parts: dict from read_partitions() (must include '_raw_regions').
     new_app: optional (name, bytes) of a replacement app.bin, or None to use
              the original app.bin bytes.
     version: if set, override the version string in both inner/outer headers
              and ota.xml files.
+    changed_partitions: optional set of resource partition names that were
+             modified (e.g. {"res.bin"}). Unchanged partitions carry their
+             original LZMA bytes verbatim. If None, all are re-encoded.
     Returns the rebuilt .bin bytes."""
     import copy
     parts = copy.deepcopy(parts)
 
     ver = version or VERSION_STR
-
+    raw = parts.get("_raw_regions", {})
     app = parts["inner_app.bin"] if new_app is None else new_app
     inner_xml = parts["inner_ota.xml"]
     outer_xml = parts["outer_ota.xml"]
 
-    # Patch version in ota.xml files if overridden
+    if changed_partitions is None:
+        changed_partitions = set()
+
+    # Patch version in both inner and outer ota.xml if overridden.
     if version:
         inner_xml = patch_version(inner_xml, VERSION_STR, version)
         outer_xml = patch_version(outer_xml, VERSION_STR, version)
 
-    # 1. Build the inner AOTA: ota.xml + app.bin + sdfs.bin (all raw).
-    inner_files = [
-        ("ota.xml", inner_xml),
-        ("app.bin", app),
-        ("sdfs.bin", parts["inner_sdfs.bin"]),
-    ]
-    inner_aota = build_aota_header(inner_files, version=ver)
+    # Rebuild inner AOTA if app.bin changed OR version bumped (the inner
+    # ota.xml version must match the outer for the watch to accept).
+    if new_app is not None or version is not None:
+        inner_files = [
+            ("ota.xml", inner_xml),
+            ("app.bin", app),
+            ("sdfs.bin", parts["inner_sdfs.bin"]),
+        ]
+        inner_aota = build_aota_header(inner_files, version=ver)
+        temp_region = lzma_blocks(inner_aota, chunk)
+    else:
+        # Inner AOTA untouched; carry original TEMP.bin verbatim.
+        temp_region = raw.get("TEMP.bin")
+        if temp_region is None:
+            raise ValueError("no raw TEMP.bin in parts and inner unchanged")
 
-    # 2. LZMA-encode the inner AOTA -> the new TEMP.bin partition.
-    temp_region = lzma_blocks(inner_aota, chunk)
+    # 2. Patch outer ota.xml with correct TEMP.bin compressed size + CRC.
+    #    For TEMP.bin, file_size == orig_size (both are compressed size).
+    outer_xml = patch_ota_xml_entry(outer_xml, "TEMP.bin",
+                                    file_size=f"0x{len(temp_region):x}",
+                                    orig_size=f"0x{len(temp_region):x}",
+                                    checksum=f"0x{crc32(temp_region):08x}")
 
-    # 2b. Patch outer ota.xml with correct TEMP.bin size and compressed CRC,
-    #     since re-compression produces a different LZMA blob.
-    temp_compressed_crc = f"0x{crc32(temp_region):08x}"
-    temp_compressed_size = f"0x{len(temp_region):x}"
-    outer_xml = patch_ota_xml_file_size(outer_xml, "TEMP.bin", temp_compressed_size)
-    outer_xml = patch_ota_xml_checksum(outer_xml, "TEMP.bin", temp_compressed_crc)
-
-    # 3. Resource partitions carried verbatim (re-encoded as LZMA, same bytes).
-    outer_files = [
-        ("ota.xml", outer_xml),
-        ("TEMP.bin", temp_region),
-    ]
+    # 3. For resource partitions, carry original LZMA bytes if unchanged.
+    res_regions = {}
     for pname in ("res.bin", "fonts.bin", "res_e.bin", "sdfs_k.bin"):
-        outer_files.append((pname, lzma_blocks(parts[pname], CHUNK_RES)))
+        if pname not in changed_partitions and pname in raw:
+            # Unchanged; carry original compressed bytes verbatim.
+            res_regions[pname] = raw[pname]
+        else:
+            # Modified; re-encode and patch ota.xml.
+            res_regions[pname] = lzma_blocks(parts[pname], CHUNK_RES)
+            outer_xml = patch_ota_xml_entry(
+                outer_xml, pname,
+                file_size=f"0x{len(res_regions[pname]):x}",
+                checksum=f"0x{crc32(parts[pname]):08x}")
 
-    # 4. Build the outer AOTA container.
+    # 4. Build outer files list.
+    outer_files = [("ota.xml", outer_xml), ("TEMP.bin", temp_region)]
+    for pname in ("res.bin", "fonts.bin", "res_e.bin", "sdfs_k.bin"):
+        outer_files.append((pname, res_regions[pname]))
+
+    # 5. Build the outer AOTA container.
     aota = build_aota_header(outer_files, version=ver)
 
-    # 5. Append trailing data (AGPS etc.) that lives after total_size.
+    # 6. Append trailing data (AGPS etc.).
     trailing = parts.get("trailing_data", b"")
     if trailing:
         print(f"  [+] appending trailing data: {len(trailing)} bytes")
@@ -398,6 +420,103 @@ def verify(orig_path):
     return ok
 
 
+def patch_sdfs_string(sdfs_data, old_bytes, new_bytes):
+    """Patch a string inside a SDFS partition (res.bin, sdfs_k.bin, etc.).
+    Patches the raw file data and recomputes the SDFS header sum_data
+    checksum (sum32 of the data segment).  The watch's sdfs_fsystem_verify
+    checks this field.  Per-file checksums (entry[24:28]) are NOT updated
+    because the watch doesn't validate them (original has mismatches).
+    Returns modified SDFS bytes."""
+    sdfs = bytearray(sdfs_data)
+    first_data_off = struct.unpack_from("<I", sdfs, 0x20 + 12)[0]
+    max_entries = first_data_off // 0x20
+    off = 0
+    entry_idx = 0
+    target_entry_off = None
+    target_offset = 0
+    target_size = 0
+    while off + 0x20 <= len(sdfs) and entry_idx < max_entries:
+        name = sdfs[off:off + 12].split(b"\x00")[0]
+        if not name:
+            break
+        if entry_idx > 0:
+            t_off, t_size = struct.unpack_from("<II", sdfs, off + 12)
+            file_data = sdfs[t_off:t_off + t_size]
+            if old_bytes in file_data:
+                if target_entry_off is not None:
+                    print(f"  [!] WARNING: found '{old_bytes}' in multiple files, "
+                          f"patching first match only", file=sys.stderr)
+                    break
+                target_entry_off = off
+                target_offset = t_off
+                target_size = t_size
+        off += 0x20
+        entry_idx += 1
+
+    if target_entry_off is None:
+        raise ValueError(f"string {old_bytes!r} not found in SDFS partition")
+
+    if len(new_bytes) != len(old_bytes):
+        raise ValueError(f"replacement must be same length: "
+                         f"{len(old_bytes)} != {len(new_bytes)}")
+
+    file_data = bytearray(sdfs[target_offset:target_offset + target_size])
+    idx = file_data.find(old_bytes)
+    file_data[idx:idx + len(old_bytes)] = new_bytes
+    sdfs[target_offset:target_offset + target_size] = file_data
+
+    data_seg = sdfs[first_data_off:]
+    new_sum_data = sum(struct.unpack_from(f"<{len(data_seg) // 4}I", data_seg)) & 0xffffffff
+    struct.pack_into("<I", sdfs, 28, new_sum_data)
+
+    return bytes(sdfs)
+
+
+# Partition name -> SDFS file that contains strings
+_SDFS_MAP = {
+    "res.bin": "bt_watch.eng",
+}
+
+
+def patch_sdfs_replace_file(sdfs_data, target_name, replacement_data):
+    """Replace the content of a file inside a SDFS partition.
+    The replacement must be the same size as the original.
+    Recomputes the SDFS header sum_data checksum.
+    Returns modified SDFS bytes."""
+    sdfs = bytearray(sdfs_data)
+    first_data_off = struct.unpack_from("<I", sdfs, 0x20 + 12)[0]
+    max_entries = first_data_off // 0x20
+    off = 0
+    entry_idx = 0
+    target_off = 0
+    target_size = 0
+    while off + 0x20 <= len(sdfs) and entry_idx < max_entries:
+        name = sdfs[off:off + 12].split(b"\x00")[0]
+        if not name:
+            break
+        if entry_idx > 0 and name == target_name.encode():
+            target_off = struct.unpack_from("<I", sdfs, off + 12)[0]
+            target_size = struct.unpack_from("<I", sdfs, off + 16)[0]
+            break
+        off += 0x20
+        entry_idx += 1
+
+    if target_off == 0:
+        raise ValueError(f"file '{target_name}' not found in SDFS partition")
+
+    if len(replacement_data) != target_size:
+        raise ValueError(f"replacement size mismatch: {len(replacement_data)} "
+                         f"!= {target_size} (original)")
+
+    sdfs[target_off:target_off + target_size] = replacement_data
+
+    data_seg = sdfs[first_data_off:]
+    new_sum_data = sum(struct.unpack_from(f"<{len(data_seg) // 4}I", data_seg)) & 0xffffffff
+    struct.pack_into("<I", sdfs, 28, new_sum_data)
+
+    return bytes(sdfs)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default=DEFAULT_BIN, help="original firmware .bin")
@@ -408,6 +527,18 @@ def main():
                     help="build with this (modified) app.bin swapped in")
     ap.add_argument("--version", metavar="VER",
                     help=f"override version string (default: {VERSION_STR})")
+    ap.add_argument("--patch", nargs=2, metavar=("OLD", "NEW"), action="append",
+                    default=[],
+                    help="patch ASCII string in resource partitions "
+                         "(same-length, hex-escaped ok)")
+    ap.add_argument("--replace-sdfs-file", nargs=2,
+                    metavar=("SDFS_PARTITION", "FILENAME"),
+                    help="replace a file inside a SDFS partition with a "
+                         "known-test pattern (same size, for testing rebuild)")
+    ap.add_argument("--touch-all", action="store_true",
+                    help="flip 1 byte in every partition (including app.bin) "
+                         "so the watch sees all as changed and requests full "
+                         "update")
     args = ap.parse_args()
 
     parts, _ = read_partitions(args.src)
@@ -428,7 +559,95 @@ def main():
     if args.version:
         print(f"[*] version override: {args.version}")
 
-    out = build(parts, new_app=new_app, version=args.version)
+    changed = set()
+
+    for old_str, new_str in args.patch:
+        old_bytes = old_str.encode("utf-8")
+        new_bytes = new_str.encode("utf-8")
+        if len(old_bytes) != len(new_bytes):
+            print(f"[!] patch string length mismatch: {len(old_bytes)} != "
+                  f"{len(new_bytes)}", file=sys.stderr)
+            sys.exit(1)
+        patched_any = False
+        for pname in ("res.bin", "sdfs_k.bin"):
+            if pname in changed:
+                continue
+            try:
+                parts[pname] = patch_sdfs_string(parts[pname], old_bytes,
+                                                 new_bytes)
+                print(f"[*] patched '{old_str}' -> '{new_str}' in {pname}")
+                changed.add(pname)
+                patched_any = True
+                break
+            except ValueError:
+                continue
+        if not patched_any:
+            print(f"[!] string '{old_str}' not found in any partition",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    if args.replace_sdfs_file:
+        pname, fname = args.replace_sdfs_file
+        if pname not in parts:
+            print(f"[!] unknown partition '{pname}'", file=sys.stderr)
+            sys.exit(1)
+        # Find the file's size in the SDFS
+        sdfs = parts[pname]
+        first_data_off = struct.unpack_from("<I", sdfs, 0x20 + 12)[0]
+        max_entries = first_data_off // 0x20
+        off = 0
+        entry_idx = 0
+        found_size = 0
+        while off + 0x20 <= len(sdfs) and entry_idx < max_entries:
+            name = sdfs[off:off + 12].split(b"\x00")[0]
+            if not name:
+                break
+            if entry_idx > 0 and name == fname.encode():
+                found_size = struct.unpack_from("<I", sdfs, off + 16)[0]
+                break
+            off += 0x20
+            entry_idx += 1
+        if found_size == 0:
+            print(f"[!] file '{fname}' not found in {pname}", file=sys.stderr)
+            sys.exit(1)
+        # Replace with 0xDEADBEEF pattern
+        replacement = (b"\xDE\xAD\xBE\xEF" * (found_size // 4 + 1))[:found_size]
+        parts[pname] = patch_sdfs_replace_file(parts[pname], fname, replacement)
+        print(f"[*] replaced '{fname}' in {pname} with 0xDEADBEEF pattern "
+              f"({found_size} bytes)")
+        changed.add(pname)
+
+    if args.touch_all:
+        # Flip one byte in app.bin (inside inner AOTA → triggers TEMP rebuild)
+        app = bytearray(parts["inner_app.bin"])
+        app[0x100] ^= 0x01
+        parts["inner_app.bin"] = bytes(app)
+        new_app = bytes(app)
+        print("[*] touched app.bin byte at 0x100")
+
+        # Flip one byte in each resource partition's data segment, recompute
+        # SDFS header sum_data.
+        for pname in ("res.bin", "fonts.bin", "res_e.bin", "sdfs_k.bin"):
+            if pname not in parts:
+                continue
+            sdfs = bytearray(parts[pname])
+            # Data segment starts at offset in entry 0 [12:16]
+            first_data_off = struct.unpack_from("<I", sdfs, 0x20 + 12)[0]
+            # Flip a byte in the middle of the data segment
+            mid = first_data_off + 0x100
+            if mid < len(sdfs):
+                sdfs[mid] ^= 0x01
+            # Recompute sum_data (sum32 of data segment)
+            data_seg = sdfs[first_data_off:]
+            n = len(data_seg) // 4
+            new_sum_data = sum(struct.unpack_from(f"<{n}I", data_seg)) & 0xffffffff
+            struct.pack_into("<I", sdfs, 28, new_sum_data)
+            parts[pname] = bytes(sdfs)
+            changed.add(pname)
+            print(f"[*] touched {pname} byte at 0x{mid:x}, sum_data=0x{new_sum_data:08x}")
+
+    out = build(parts, new_app=new_app, version=args.version,
+                changed_partitions=changed)
     with open(args.out, "wb") as f:
         f.write(out)
     print(f"[*] wrote {args.out} ({len(out)} bytes)")
